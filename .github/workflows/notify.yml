@@ -8,7 +8,16 @@ on:
     - cron: "0,30 0-8 * * 1-5"  # 월~금 00:00~08:30 UTC (월~금 09:00~17:30 KST)
   workflow_dispatch:             # 수동 실행 버튼
 
+env:
+  # 모든 스텝에서 Node.js 24를 사용하도록 강제함
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
   check-notice:
     runs-on: ubuntu-latest
 
