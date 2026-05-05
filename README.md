@@ -49,4 +49,3 @@ Actions 탭 → **DEU Notice Bot** → **Run workflow** 버튼으로 즉시 실�
 
 ## 실행 주기
 평일 오전 8시 ~ 오후 6시, **30분마다** 자동 실행됩니다.
-(GitHub Actions 무료 플랜: 월 2,000분 → 충분히 여유 있음)
