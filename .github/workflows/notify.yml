@@ -29,14 +29,26 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4
+          pip install -r requirements.txt
 
       - name: Run bot
         env:
+          # 카테고리별 채널 웹후크. 등록하지 않은 카테고리는 건너뜁니다.
+          WEBHOOK_GENERAL: ${{ secrets.WEBHOOK_GENERAL }}
+          WEBHOOK_SCHOLARSHIP: ${{ secrets.WEBHOOK_SCHOLARSHIP }}
+          WEBHOOK_EDUCATION: ${{ secrets.WEBHOOK_EDUCATION }}
+          WEBHOOK_DORMITORY: ${{ secrets.WEBHOOK_DORMITORY }}
+          WEBHOOK_JOB: ${{ secrets.WEBHOOK_JOB }}
+          WEBHOOK_BIDS: ${{ secrets.WEBHOOK_BIDS }}
+          WEBHOOK_EXTERNAL: ${{ secrets.WEBHOOK_EXTERNAL }}
+          # 위 값이 없는 카테고리는 이 공용 웹후크로 전송됩니다.
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # 선택: 제목에 이 키워드가 들어간 공지만 전송 (쉼표 구분, 비우면 전체)
+          NOTICE_KEYWORDS: ${{ vars.NOTICE_KEYWORDS }}
         run: python main.py
 
       - name: Commit and Push seen.json
+        if: always()           # 전송이 일부 실패해도 전송 기록은 남깁니다
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

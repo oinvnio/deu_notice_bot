@@ -2,7 +2,19 @@ import re
 import requests
 from bs4 import BeautifulSoup
 
-NOTICE_URL = "https://www.deu.ac.kr/www/deu-notice.do"
+BASE_URL = "https://www.deu.ac.kr"
+
+# 카테고리 슬러그 → (표시 이름, 게시판 경로, 임베드 색상)
+# 슬러그는 GitHub Secret 이름(WEBHOOK_<슬러그 대문자>)에 그대로 쓰입니다.
+CATEGORIES = {
+    "general":     ("일반",      "/www/deu-notice.do",      0x0057A8),
+    "scholarship": ("장학",      "/www/deu-scholarship.do", 0x2E8B57),
+    "education":   ("교육·모집", "/www/deu-education.do",   0x8A2BE2),
+    "dormitory":   ("기숙사",    "/www/deu-dormitory.do",   0xD2691E),
+    "job":         ("채용",      "/www/deu-job.do",         0x1E90FF),
+    "bids":        ("입찰",      "/www/deu-bids.do",        0x708090),
+    "external":    ("외부기관",  "/www/deu-external.do",    0xB8860B),
+}
 
 HEADERS = {
     "User-Agent": (
@@ -13,12 +25,18 @@ HEADERS = {
 }
 
 
-def fetch_notices() -> list[dict]:
+def fetch_notices(slug: str = "general") -> list[dict]:
     """
-    동의대학교 공지사항 페이지를 크롤링하여 공지 목록을 반환합니다.
-    반환값: [{"id": str, "title": str, "date": str, "url": str}, ...]
+    지정한 카테고리의 공지 목록을 크롤링합니다.
+    반환값: [{"id", "title", "date", "url", "category"}, ...]
     """
-    resp = requests.get(NOTICE_URL, headers=HEADERS, timeout=15)
+    if slug not in CATEGORIES:
+        raise ValueError(f"알 수 없는 카테고리: {slug}")
+
+    label, path, _color = CATEGORIES[slug]
+    board_url = BASE_URL + path
+
+    resp = requests.get(board_url, headers=HEADERS, timeout=15)
     resp.raise_for_status()
     resp.encoding = "utf-8"
 
@@ -42,10 +60,10 @@ def fetch_notices() -> list[dict]:
         if href.startswith("http"):
             url = href
         elif href.startswith("/"):
-            url = "https://www.deu.ac.kr" + href
+            url = BASE_URL + href
         else:
-            # 상대경로 쿼리스트링 형식 (?mode=view&...)
-            url = "https://www.deu.ac.kr/www/deu-notice.do" + href
+            # 상대경로 쿼리스트링 형식 (?mode=view&...) → 해당 게시판 기준
+            url = board_url + href
 
         # 날짜: td.data
         date_td = row.select_one("td.data")
@@ -60,11 +78,15 @@ def fetch_notices() -> list[dict]:
             "title": title,
             "date": date,
             "url": url,
+            "category": label,
         })
 
     return notices
 
 
 if __name__ == "__main__":
-    for n in fetch_notices():
-        print(n)
+    for slug, (label, _path, _color) in CATEGORIES.items():
+        items = fetch_notices(slug)
+        print(f"[{label}] {len(items)}건")
+        for n in items[:3]:
+            print(f"  {n['id']} | {n['date']} | {n['title'][:40]}")
