@@ -6,13 +6,15 @@
 
 | 카테고리 | 게시판 | GitHub Secret 이름 |
 |---|---|---|
-| 일반 | `/www/deu-notice.do` | `WEBHOOK_GENERAL` |
-| 장학 | `/www/deu-scholarship.do` | `WEBHOOK_SCHOLARSHIP` |
-| 교육·모집 | `/www/deu-education.do` | `WEBHOOK_EDUCATION` |
-| 기숙사 | `/www/deu-dormitory.do` | `WEBHOOK_DORMITORY` |
-| 채용 | `/www/deu-job.do` | `WEBHOOK_JOB` |
-| 입찰 | `/www/deu-bids.do` | `WEBHOOK_BIDS` |
-| 외부기관 | `/www/deu-external.do` | `WEBHOOK_EXTERNAL` |
+| 📢 일반 | `/www/deu-notice.do` | `WEBHOOK_GENERAL` |
+| 💰 장학 | `/www/deu-scholarship.do` | `WEBHOOK_SCHOLARSHIP` |
+| 📚 교육·모집 | `/www/deu-education.do` | `WEBHOOK_EDUCATION` |
+| 🏠 기숙사 | `/www/deu-dormitory.do` | `WEBHOOK_DORMITORY` |
+| 💼 채용 | `/www/deu-job.do` | `WEBHOOK_JOB` |
+| 📋 입찰 | `/www/deu-bids.do` | `WEBHOOK_BIDS` |
+| 🌐 외부기관 | `/www/deu-external.do` | `WEBHOOK_EXTERNAL` |
+
+카테고리별 이름·이모지·임베드 색상은 `crawler.py`의 `CATEGORIES`에서 한곳으로 관리합니다.
 
 - 시크릿을 등록한 카테고리만 동작합니다. 등록하지 않은 카테고리는 조용히 건너뜁니다.
 - 카테고리 전용 시크릿이 없으면 공용 `DISCORD_WEBHOOK_URL`로 전송됩니다.
@@ -21,7 +23,7 @@
 ## 파일 구조
 
 ```
-├── crawler.py          # 카테고리별 공지 크롤링 (CATEGORIES에 게시판 정의)
+├── crawler.py          # 카테고리별 공지 크롤링 (CATEGORIES에 게시판·이모지·색상 정의)
 ├── main.py             # 새 공지 감지 & 채널별 디스코드 전송
 ├── requirements.txt    # 의존성
 ├── seen.json           # 카테고리별 전송 완료 공지 ID (중복 방지)

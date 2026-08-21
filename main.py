@@ -6,7 +6,7 @@ from pathlib import Path
 
 import requests
 
-from crawler import CATEGORIES, fetch_notices
+from crawler import CATEGORIES, Category, fetch_notices
 
 # 이모지가 섞인 공지 제목을 출력해도 죽지 않도록 (Windows 콘솔 등)
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -64,12 +64,13 @@ def matches_keywords(notice: dict) -> bool:
     return any(k in title for k in KEYWORDS)
 
 
-def send_discord(notice: dict, webhook: str, color: int) -> None:
+def send_discord(notice: dict, webhook: str, cat: Category) -> None:
     embed = {
-        "title": notice["title"],
+        # 제목 앞 이모지는 알림·채널 목록에서 카테고리를 한눈에 구분하기 위한 것입니다.
+        "title": f"{cat.emoji} {notice['title']}",
         "url": notice["url"],
-        "color": color,
-        "footer": {"text": f"📅 {notice['date']} · 동의대 {notice['category']} 공지"},
+        "color": cat.color,
+        "footer": {"text": f"📅 {notice['date']} · 동의대 {cat.label} 공지"},
     }
     resp = requests.post(webhook, json={"embeds": [embed]}, timeout=10)
     resp.raise_for_status()
@@ -93,7 +94,8 @@ def send_alert(message: str, webhook: str) -> None:
 
 def process_category(slug: str, seen: dict[str, set[str]]) -> bool:
     """한 카테고리를 크롤링해 새 공지를 전송합니다. 성공하면 True."""
-    label, _path, color = CATEGORIES[slug]
+    cat = CATEGORIES[slug]
+    label = cat.label
     webhook = webhook_for(slug)
 
     try:
@@ -131,7 +133,7 @@ def process_category(slug: str, seen: dict[str, set[str]]) -> bool:
             time.sleep(SEND_INTERVAL)
         print(f"[{label}] 전송: {notice['title']}")
         try:
-            send_discord(notice, webhook, color)
+            send_discord(notice, webhook, cat)
         except requests.RequestException as e:
             # 실패한 공지는 seen에 넣지 않아 다음 실행에서 다시 시도합니다.
             send_alert(f"[{label}] 디스코드 전송 실패: `{e}`", webhook)
@@ -149,7 +151,7 @@ def safe_process(slug: str, seen: dict[str, set[str]]) -> bool:
     try:
         return process_category(slug, seen)
     except Exception as e:
-        label = CATEGORIES[slug][0]
+        label = CATEGORIES[slug].label
         send_alert(f"[{label}] 처리 중 예기치 못한 오류: `{e}`", webhook_for(slug))
         return False
 

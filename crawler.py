@@ -1,19 +1,28 @@
 import re
+from typing import NamedTuple
+
 import requests
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://www.deu.ac.kr"
 
-# 카테고리 슬러그 → (표시 이름, 게시판 경로, 임베드 색상)
+
+class Category(NamedTuple):
+    label: str    # 디스코드에 표시할 이름
+    path: str     # 게시판 경로
+    color: int    # 임베드 왼쪽 띠 색상
+    emoji: str    # 공지 제목 앞에 붙일 이모지
+
+
 # 슬러그는 GitHub Secret 이름(WEBHOOK_<슬러그 대문자>)에 그대로 쓰입니다.
 CATEGORIES = {
-    "general":     ("일반",      "/www/deu-notice.do",      0x0057A8),
-    "scholarship": ("장학",      "/www/deu-scholarship.do", 0x2E8B57),
-    "education":   ("교육·모집", "/www/deu-education.do",   0x8A2BE2),
-    "dormitory":   ("기숙사",    "/www/deu-dormitory.do",   0xD2691E),
-    "job":         ("채용",      "/www/deu-job.do",         0x1E90FF),
-    "bids":        ("입찰",      "/www/deu-bids.do",        0x708090),
-    "external":    ("외부기관",  "/www/deu-external.do",    0xB8860B),
+    "general":     Category("일반",      "/www/deu-notice.do",      0x0057A8, "📢"),
+    "scholarship": Category("장학",      "/www/deu-scholarship.do", 0x2E8B57, "💰"),
+    "education":   Category("교육·모집", "/www/deu-education.do",   0x8A2BE2, "📚"),
+    "dormitory":   Category("기숙사",    "/www/deu-dormitory.do",   0xD2691E, "🏠"),
+    "job":         Category("채용",      "/www/deu-job.do",         0x1E90FF, "💼"),
+    "bids":        Category("입찰",      "/www/deu-bids.do",        0x708090, "📋"),
+    "external":    Category("외부기관",  "/www/deu-external.do",    0xB8860B, "🌐"),
 }
 
 HEADERS = {
@@ -33,8 +42,8 @@ def fetch_notices(slug: str = "general") -> list[dict]:
     if slug not in CATEGORIES:
         raise ValueError(f"알 수 없는 카테고리: {slug}")
 
-    label, path, _color = CATEGORIES[slug]
-    board_url = BASE_URL + path
+    cat = CATEGORIES[slug]
+    board_url = BASE_URL + cat.path
 
     resp = requests.get(board_url, headers=HEADERS, timeout=15)
     resp.raise_for_status()
@@ -78,15 +87,15 @@ def fetch_notices(slug: str = "general") -> list[dict]:
             "title": title,
             "date": date,
             "url": url,
-            "category": label,
+            "category": cat.label,
         })
 
     return notices
 
 
 if __name__ == "__main__":
-    for slug, (label, _path, _color) in CATEGORIES.items():
+    for slug, cat in CATEGORIES.items():
         items = fetch_notices(slug)
-        print(f"[{label}] {len(items)}건")
+        print(f"{cat.emoji} [{cat.label}] {len(items)}건")
         for n in items[:3]:
             print(f"  {n['id']} | {n['date']} | {n['title'][:40]}")
