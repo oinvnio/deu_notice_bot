@@ -8,7 +8,7 @@ from pathlib import Path
 import requests
 
 from crawler import CATEGORIES, Category, fetch_notices
-from menu import DORMS, KST, Dorm, fetch_menu
+from menu import DORMS, KST, Dorm, fetch_menu, pick_today
 
 # 이모지가 섞인 공지 제목을 출력해도 죽지 않도록 (Windows 콘솔 등)
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -20,10 +20,10 @@ MAX_SEEN = 300        # 카테고리별 seen 보관 개수 (파일 무한 증가
 SEND_INTERVAL = 0.5   # 연속 전송 간격(초), 디스코드 레이트리밋 회피
 
 # 식단표는 공지와 성격이 달라 seen.json 안에서 "menu:" 슬롯에 따로 기록합니다.
-# (공지는 공지 ID, 식단은 주차 키를 넣습니다.)
+# (공지는 공지 ID, 식단은 전송한 날짜를 넣습니다.)
 MENU_SLOT = "menu:"
 MENU_ALERT_SLOT = "menu:_alerts"
-MENU_MAX_FIELDS = 7      # 임베드 하나에 담을 요일 수
+MENU_MAX_FIELDS = 6      # 임베드 하나에 담을 끼니 수
 MENU_MAX_CHARS = 4500    # 임베드 하나의 글자 수 상한 (디스코드 한도 6000)
 
 # 카테고리별 웹후크가 없으면 이 값으로 대체합니다(전부 한 채널로 전송).
@@ -170,18 +170,19 @@ def process_category(slug: str, seen: dict[str, set[str]]) -> bool:
     return True
 
 
-# ── 주간 식단표 ────────────────────────────────────────────────────────
+# ── 오늘의 식단 ────────────────────────────────────────────────────────
 
-def build_menu_embeds(dorm: Dorm, menu: dict) -> list[dict]:
-    """요일 하나를 필드 하나로 만들고, 디스코드 한도에 맞춰 임베드를 나눕니다."""
-    fields = []
-    for day in menu["days"]:
-        body = "\n\n".join(f"**{m['name']}**\n{m['text']}" for m in day["meals"])
-        fields.append({
-            "name": _clip(day["day"] or "\u200b", 256),
-            "value": _clip(body or "-", 1024),
-            "inline": False,
-        })
+def build_menu_embeds(dorm: Dorm, menu: dict, day: dict) -> list[dict]:
+    """끼니 하나를 필드 하나로 만들고, 디스코드 한도에 맞춰 임베드를 나눕니다."""
+    fields = [
+        {
+            "name": _clip(meal["name"] or "\u200b", 256),
+            "value": _clip(meal["text"] or "-", 1024),
+            # 조식·중식·석식이 한 줄에 나란히 보이도록 합니다.
+            "inline": True,
+        }
+        for meal in day["meals"]
+    ]
 
     chunks: list[list[dict]] = []
     current: list[dict] = []
@@ -200,7 +201,7 @@ def build_menu_embeds(dorm: Dorm, menu: dict) -> list[dict]:
     for i, chunk in enumerate(chunks):
         embed = {
             "title": _clip(
-                f"{dorm.emoji} {dorm.label} 주간 식단표" + (" (이어서)" if i else ""), 256
+                f"{dorm.emoji} {dorm.label} 오늘의 식단" + (" (이어서)" if i else ""), 256
             ),
             "color": dorm.color,
             "fields": chunk,
@@ -208,8 +209,8 @@ def build_menu_embeds(dorm: Dorm, menu: dict) -> list[dict]:
         if i == 0:
             # url은 첫 임베드에만 답니다. 같은 url이 여러 임베드에 붙으면 디스코드가 합쳐 버립니다.
             embed["url"] = menu["url"]
-            if menu["week_label"]:
-                embed["description"] = f"📅 {_clip(menu['week_label'], 200)}"
+            if day["day"]:
+                embed["description"] = f"📅 {_clip(day['day'], 200)}"
         if i == len(chunks) - 1:
             embed["footer"] = {"text": f"동의대 {dorm.label} 식단"}
         embeds.append(embed)
@@ -243,9 +244,15 @@ def alert_once_a_day(message: str, webhook: str, seen: dict[str, set[str]], slug
 
 
 def process_menu(slug: str, seen: dict[str, set[str]]) -> bool:
-    """한 기숙사의 이번 주 식단표를 (아직 안 보냈다면) 전송합니다."""
+    """한 기숙사의 오늘 식단을 (아직 안 보냈다면) 전송합니다."""
     dorm = DORMS[slug]
     webhook = menu_webhook_for(slug)
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+
+    sent = seen.setdefault(MENU_SLOT + slug, set())
+    if today in sent:
+        print(f"[{dorm.label} 식단] 오늘({today}) 식단은 이미 전송했습니다.")
+        return True
 
     try:
         menu = fetch_menu(slug)
@@ -261,20 +268,25 @@ def process_menu(slug: str, seen: dict[str, set[str]]) -> bool:
             webhook, seen, slug,
         )
 
-    sent = seen.setdefault(MENU_SLOT + slug, set())
-    if menu["week_key"] in sent:
-        print(f"[{dorm.label} 식단] {menu['week_label']} 는 이미 전송했습니다.")
+    day = pick_today(menu["days"])
+    if day is None:
+        # 아직 이번 주 식단이 안 올라왔거나, 오늘은 식당을 운영하지 않는 날입니다.
+        # 둘 다 정상적인 상황이라 경고하지 않고 다음 실행에서 다시 확인합니다.
+        print(
+            f"[{dorm.label} 식단] 오늘 칸이 없습니다. "
+            f"(표에 있는 날: {', '.join(d['day'] for d in menu['days'])})"
+        )
         return True
 
-    print(f"[{dorm.label} 식단] 전송: {menu['week_label']} ({len(menu['days'])}일치)")
+    print(f"[{dorm.label} 식단] 전송: {day['day']} ({len(day['meals'])}끼니)")
     try:
-        send_menu(build_menu_embeds(dorm, menu), webhook)
+        send_menu(build_menu_embeds(dorm, menu, day), webhook)
     except requests.RequestException as e:
-        # 주차를 기록하지 않으므로 다음 실행에서 다시 시도합니다.
+        # 날짜를 기록하지 않으므로 다음 실행에서 다시 시도합니다.
         send_alert(f"[{dorm.label} 식단] 디스코드 전송 실패: `{e}`", webhook)
         return False
 
-    sent.add(menu["week_key"])
+    sent.add(today)
     return True
 
 

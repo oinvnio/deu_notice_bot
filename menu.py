@@ -1,5 +1,8 @@
 """
-기숙사 주간 식단표 크롤러.
+기숙사 식단표 크롤러.
+
+식단표는 한 주 단위로 올라오므로 주간 표를 통째로 읽은 뒤,
+main.py가 pick_today()로 그날 칸만 뽑아 씁니다.
 
 식단표 페이지는 공지 게시판과 달리 표(<table>) 한 장이 전부라서,
 클래스 이름 대신 **표의 내용**으로 식단표를 찾아냅니다.
@@ -177,7 +180,8 @@ def _parse_grid(grid: list[list[str]]) -> list[dict]:
             if grid[r][c]
         ]
         if meals:
-            days.append({"day": header(c), "meals": meals})
+            label = header(c)
+            days.append({"day": label, "key": _day_key(label), "meals": meals})
     return days
 
 
@@ -238,35 +242,49 @@ def _select_table(soup, keyword: str = "", require_keyword: bool = False) -> lis
     return []
 
 
-# ── 주차 식별 ──────────────────────────────────────────────────────────
+# ── 오늘 날짜 고르기 ───────────────────────────────────────────────────
 
-def _week_key(days: list[dict]) -> str:
+WEEKDAYS = "월화수목금토일"
+
+
+def _day_key(label: str) -> str:
     """
-    같은 주 식단을 두 번 보내지 않기 위한 열쇠.
-    머리글에서 날짜를 읽어내고, 날짜가 없으면 오늘(KST)이 속한 ISO 주차를 씁니다.
+    요일 머리글에서 날짜를 뽑아 "MM-DD"로 만듭니다.
+    날짜가 없고 요일만 적힌 표라면 요일 한 글자("월")를 씁니다.
     """
-    today = datetime.now(KST).date()
-    for day in days:
-        t = day["day"]
-        m = re.search(r"(20\d{2})[.\-/\s]+(\d{1,2})[.\-/\s]+(\d{1,2})", t)
+    # "2026.09.07"처럼 연도가 붙은 형태를 먼저 봅니다.
+    # (연도를 먼저 걸러내지 않으면 "26.09"를 월·일로 잘못 읽습니다.)
+    for pattern in (
+        r"20\d{2}\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})",
+        r"(\d{1,2})\s*[.\-/월]\s*(\d{1,2})",
+    ):
+        m = re.search(pattern, label)
         if m:
-            y, mo, d = (int(x) for x in m.groups())
-        else:
-            m = re.search(r"(\d{1,2})\s*[.\-/월]\s*(\d{1,2})", t)
-            if not m:
-                continue
-            y, mo, d = today.year, int(m.group(1)), int(m.group(2))
-        try:
-            return f"{y:04d}-{mo:02d}-{d:02d}"
-        except ValueError:
-            continue
-    iso = today.isocalendar()
-    return f"{iso[0]}-W{iso[1]:02d}"
+            month, day = int(m.group(1)), int(m.group(2))
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                return f"{month:02d}-{day:02d}"
+            break
+    m = re.search(f"[{WEEKDAYS}]", label)
+    return m.group(0) if m else ""
 
 
-def _week_label(days: list[dict]) -> str:
-    first, last = days[0]["day"], days[-1]["day"]
-    return first if first == last else f"{first} ~ {last}"
+def pick_today(days: list[dict], today: datetime | None = None) -> dict | None:
+    """
+    주간 표에서 오늘(KST) 칸을 골라냅니다. 오늘 칸이 없으면 None.
+
+    날짜가 적힌 표는 날짜로 맞춥니다. 지난주 식단이 그대로 걸려 있어도
+    날짜가 어긋나면 보내지 않으므로 묵은 식단을 전송할 일이 없습니다.
+    날짜 없이 요일만 적힌 표일 때만 요일로 맞춥니다.
+    """
+    now = today or datetime.now(KST)
+    dated = [d for d in days if re.fullmatch(r"\d{2}-\d{2}", d["key"])]
+
+    if dated:
+        wanted = now.strftime("%m-%d")
+        return next((d for d in dated if d["key"] == wanted), None)
+
+    wanted = WEEKDAYS[now.weekday()]
+    return next((d for d in days if d["key"] == wanted), None)
 
 
 # ── 공개 API ───────────────────────────────────────────────────────────
@@ -281,8 +299,9 @@ def _soup(url: str) -> BeautifulSoup:
 def fetch_menu(slug: str) -> dict:
     """
     지정한 기숙사의 이번 주 식단표를 크롤링합니다.
-    반환값: {"dorm", "label", "url", "week_key", "week_label", "days"}
-            days = [{"day": "9/1(월)", "meals": [{"name": "조식", "text": "..."}]}]
+    반환값: {"dorm", "label", "url", "days"}
+            days = [{"day": "9/1(월)", "key": "09-01",
+                     "meals": [{"name": "조식", "text": "..."}]}]
     파싱에 실패하면 days가 빈 리스트입니다(main.py가 경고를 보냅니다).
     """
     if slug not in DORMS:
@@ -303,8 +322,6 @@ def fetch_menu(slug: str) -> dict:
         "dorm": slug,
         "label": dorm.label,
         "url": url,
-        "week_key": _week_key(days) if days else "",
-        "week_label": _week_label(days) if days else "",
         "days": days,
     }
 
@@ -313,16 +330,20 @@ if __name__ == "__main__":
     ok = True
     for slug, dorm in DORMS.items():
         menu = fetch_menu(slug)
-        print(f"\n{dorm.emoji} [{dorm.label}] {dorm.path} → {len(menu['days'])}일치")
+        print(f"\n{dorm.emoji} [{dorm.label}] {menu['url']} → {len(menu['days'])}일치")
         if not menu["days"]:
             ok = False
             print("  ⚠️ 식단표를 찾지 못했습니다. 페이지 구조를 확인해 주세요:")
-            print(f"     curl -s {BASE_URL}{dorm.path} > menu.html")
+            print(f"     curl -s {menu['url']} > menu.html")
             continue
-        print(f"  주차: {menu['week_label']}  (키: {menu['week_key']})")
+
+        today = pick_today(menu["days"])
         for day in menu["days"]:
-            print(f"  - {day['day']}")
+            mark = "👉" if day is today else "  "
+            print(f"  {mark} {day['day']}  (키: {day['key']})")
             for meal in day["meals"]:
                 body = meal["text"].replace("\n", ", ")
-                print(f"      {meal['name']}: {body[:60]}")
+                print(f"        {meal['name']}: {body[:60]}")
+        if today is None:
+            print("  ⚠️ 오늘 칸을 찾지 못했습니다(아직 갱신 전이거나 오늘은 미운영).")
     sys.exit(0 if ok else 1)
