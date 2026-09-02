@@ -27,7 +27,6 @@ KST = timezone(timedelta(hours=9))
 
 class Dorm(NamedTuple):
     label: str      # 디스코드에 표시할 이름
-    path: str       # 기숙사별 급식 안내 페이지 (메인 페이지가 비었을 때 예비로 훑음)
     color: int      # 임베드 왼쪽 띠 색상
     emoji: str      # 제목 앞에 붙일 이모지
     keyword: str    # 메인 페이지에서 이 관의 표를 골라낼 때 쓰는 단어
@@ -40,8 +39,8 @@ MENU_PATH = "/00/0000.do"
 
 # 슬러그는 GitHub Secret 이름(WEBHOOK_MENU_<슬러그 대문자>)에 그대로 쓰입니다.
 DORMS = {
-    "hyomin": Dorm("효민생활관", "/60/6050.do", 0x2E8B57, "🍚", "효민"),
-    "happy":  Dorm("행복기숙사", "/60/6051.do", 0xC05621, "🍱", "행복"),
+    "hyomin": Dorm("효민생활관", 0x2E8B57, "🍚", "효민"),
+    "happy":  Dorm("행복기숙사", 0xC05621, "🍱", "행복"),
 }
 
 # 표가 어느 관의 것인지 가려낼 때 쓰는 이름 목록
@@ -373,9 +372,9 @@ def pick_today(days: list[dict], today: datetime | None = None) -> dict | None:
 
 # ── 식당 운영시간 (고정값) ─────────────────────────────────────────────
 #
-# 급식 안내 페이지의 운영시간 안내표를 보고 옮겨 적은 값입니다.
-#   효민생활관: https://dorm.deu.ac.kr/60/6050.do
-#   행복기숙사: https://dorm.deu.ac.kr/60/6051.do
+# 급식 안내 페이지를 사람이 보고 옮겨 적은 값입니다(크롤링하지 않습니다).
+#   출처 - 효민생활관: https://dorm.deu.ac.kr/60/6050.do
+#         행복기숙사: https://dorm.deu.ac.kr/60/6051.do
 # 시간이 바뀌면 이 표만 고치면 됩니다. (확인일: 2026-09-02)
 #
 # 학기/방학은 달로 어림잡습니다(1·2·7·8월을 방학으로 봄). 개강·종강 시점이
@@ -432,14 +431,10 @@ def fetch_menu(slug: str) -> dict:
 
     dorm = DORMS[slug]
 
-    # 메인 페이지에 두 관 식단이 함께 있으므로 관 이름이 붙은 표만 인정합니다.
+    # 식단은 메인 페이지 한 곳에만 있습니다. 두 관이 함께 올라오므로
+    # 표 앞 제목("효민생활관 식단" / "행복기숙사 식단")이 붙은 표만 인정합니다.
     url = os.environ.get(f"MENU_URL_{slug.upper()}", "").strip() or BASE_URL + MENU_PATH
     days = _select_table(_soup(url), dorm.keyword, require_keyword=True)
-
-    # 거기서 못 찾으면 기숙사별 급식 안내 페이지를 훑어봅니다.
-    if not days:
-        url = BASE_URL + dorm.path
-        days = _select_table(_soup(url), dorm.keyword)
 
     return {
         "dorm": slug,
@@ -601,14 +596,12 @@ if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     if "--scripts" in sys.argv:
-        for url in [BASE_URL + MENU_PATH] + [BASE_URL + d.path for d in DORMS.values()]:
-            find_scripts(url)
+        find_scripts(BASE_URL + MENU_PATH)
         sys.exit(0)
 
     if "--tables" in sys.argv:
         # 페이지에 어떤 표와 링크가 있는지 그대로 보여줍니다.
-        for url in [BASE_URL + MENU_PATH] + [BASE_URL + d.path for d in DORMS.values()]:
-            diagnose(url)
+        diagnose(BASE_URL + MENU_PATH)
         sys.exit(0)
 
     ok = True
