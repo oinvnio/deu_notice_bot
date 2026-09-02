@@ -2,7 +2,9 @@ name: DEU Notice Bot
 
 on:
   schedule:
-    # 평일 오전 8시 ~ 오후 6시, 30분마다 실행 (KST = UTC+9)
+    # 오늘의 식단용: 매일(주말 포함) 오전 7:00 KST (KST = UTC+9)
+    - cron: "0 22 * * *"
+    # 공지용: 평일 오전 8시 ~ 오후 6시, 30분마다 실행
     - cron: "0,30 23 * * 0-4"   # 월~금 오전 8:00, 8:30 KST
     - cron: "0,30 0-8 * * 1-5"  # 월~금 오전 9:00 ~ 오후 5:30 KST
   workflow_dispatch:           # 수동 실행 버튼
@@ -41,6 +43,13 @@ jobs:
           WEBHOOK_JOB: ${{ secrets.WEBHOOK_JOB }}
           WEBHOOK_BIDS: ${{ secrets.WEBHOOK_BIDS }}
           WEBHOOK_EXTERNAL: ${{ secrets.WEBHOOK_EXTERNAL }}
+          # 기숙사 주간 식단표. 없으면 WEBHOOK_DORMITORY → 공용 순으로 전송됩니다.
+          WEBHOOK_MENU: ${{ secrets.WEBHOOK_MENU }}
+          WEBHOOK_MENU_HYOMIN: ${{ secrets.WEBHOOK_MENU_HYOMIN }}
+          WEBHOOK_MENU_HAPPY: ${{ secrets.WEBHOOK_MENU_HAPPY }}
+          # 선택: 식단표 페이지 주소가 바뀌었을 때 코드 수정 없이 덮어쓰기
+          MENU_URL_HYOMIN: ${{ vars.MENU_URL_HYOMIN }}
+          MENU_URL_HAPPY: ${{ vars.MENU_URL_HAPPY }}
           # 위 값이 없는 카테고리는 이 공용 웹후크로 전송됩니다.
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           # 선택: 제목에 이 키워드가 들어간 공지만 전송 (쉼표 구분, 비우면 전체)

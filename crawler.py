@@ -1,4 +1,5 @@
 import re
+import sys
 from typing import NamedTuple
 
 import requests
@@ -94,6 +95,9 @@ def fetch_notices(slug: str = "general") -> list[dict]:
 
 
 if __name__ == "__main__":
+    # 이모지가 섞인 출력을 한글 Windows(cp949 콘솔)에서도 안전하게 찍습니다.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     for slug, cat in CATEGORIES.items():
         items = fetch_notices(slug)
         print(f"{cat.emoji} [{cat.label}] {len(items)}건")
