@@ -212,6 +212,22 @@ def _owner(table, depth: int = 12) -> str:
     return ""
 
 
+TIME_RE = re.compile(r"\d{1,2}\s*:\s*\d{2}")
+
+
+def _looks_like_hours(days: list[dict]) -> bool:
+    """
+    조식·중식·석식 행을 가졌지만 내용이 "07:30 ~ 09:00"인 표,
+    즉 식당 **운영시간 안내표**를 걸러냅니다.
+    급식 안내 페이지에는 이 표가 식단표와 나란히 있어서 헷갈립니다.
+    """
+    texts = [meal["text"] for day in days for meal in day["meals"]]
+    if not texts:
+        return True
+    timed = sum(1 for t in texts if TIME_RE.search(t))
+    return timed * 2 >= len(texts)
+
+
 def _select_table(soup, keyword: str = "", require_keyword: bool = False) -> list[dict]:
     """
     페이지의 모든 표를 훑어 식단표로 가장 그럴듯한 것을 고릅니다.
@@ -232,7 +248,7 @@ def _select_table(soup, keyword: str = "", require_keyword: bool = False) -> lis
             if require_keyword and not matched:
                 continue
             days = _parse_grid(_grid(table))
-            if not days:
+            if not days or _looks_like_hours(days):
                 continue
             score = len(days) + (100 if matched else 0)
             if score > best_score:
@@ -264,8 +280,13 @@ def _day_key(label: str) -> str:
             if 1 <= month <= 12 and 1 <= day <= 31:
                 return f"{month:02d}-{day:02d}"
             break
-    m = re.search(f"[{WEEKDAYS}]", label)
-    return m.group(0) if m else ""
+    # 요일은 "월요일", "(월)", 또는 칸 전체가 "월"일 때만 인정합니다.
+    # 그냥 포함 여부로 보면 "주말 및 공휴일"의 '일'을 일요일로 잘못 읽습니다.
+    m = re.search(f"([{WEEKDAYS}])요일", label) or re.search(f"\\(([{WEEKDAYS}])\\)", label)
+    if m:
+        return m.group(1)
+    stripped = label.strip()
+    return stripped if stripped in WEEKDAYS else ""
 
 
 def pick_today(days: list[dict], today: datetime | None = None) -> dict | None:
@@ -326,9 +347,64 @@ def fetch_menu(slug: str) -> dict:
     }
 
 
+def diagnose(url: str) -> None:
+    """
+    식단표를 못 찾을 때 페이지에 무엇이 있는지 훑어봅니다.
+    `python menu.py --tables` 로 실행합니다.
+    """
+    print(f"\n### {url}")
+    try:
+        soup = _soup(url)
+    except Exception as e:
+        print(f"  가져오기 실패: {e}")
+        return
+
+    tables = soup.find_all("table")
+    print(f"  표 {len(tables)}개")
+    for i, table in enumerate(tables):
+        grid = _grid(table)
+        if not grid:
+            print(f"  [{i}] 빈 표")
+            continue
+        days = _parse_grid(grid)
+        if not days:
+            verdict = "식단 아님"
+        elif _looks_like_hours(days):
+            verdict = "운영시간표(제외)"
+        else:
+            verdict = f"식단표 후보 {len(days)}일치"
+        print(f"  [{i}] {len(grid)}행 x {len(grid[0])}열 · {verdict}")
+        for r, cells in enumerate(grid[:3]):
+            line = " | ".join(c.replace("\n", " ") for c in cells[:7])
+            print(f"        {r}행: {line[:100]}")
+
+    # 실제 식단표 페이지로 가는 링크가 어디 있는지 찾습니다.
+    hits = []
+    for a in soup.find_all("a"):
+        text = a.get_text(" ", strip=True)
+        href = a.get("href", "")
+        if any(k in text for k in ("식단", "메뉴", "급식")) or any(
+            k in href.lower() for k in ("diet", "menu", "food", "meal")
+        ):
+            hits.append((text[:40] or "(글자 없음)", href[:120]))
+    print(f"  식단 관련 링크 {len(hits)}개")
+    for text, href in hits[:25]:
+        print(f"     - {text} → {href}")
+
+
 if __name__ == "__main__":
     # 이모지가 섞인 출력을 한글 Windows(cp949 콘솔)에서도 안전하게 찍습니다.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    if "--tables" in sys.argv:
+        # 페이지에 어떤 표와 링크가 있는지 그대로 보여줍니다.
+        seen_urls = []
+        for dorm in DORMS.values():
+            seen_urls.append(BASE_URL + dorm.path)
+        seen_urls.append(BASE_URL + FALLBACK_PATH)
+        for url in seen_urls:
+            diagnose(url)
+        sys.exit(0)
 
     ok = True
     for slug, dorm in DORMS.items():
