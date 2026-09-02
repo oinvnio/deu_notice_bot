@@ -591,9 +591,91 @@ def find_scripts(url: str) -> None:
         print("  단서를 찾지 못했습니다.")
 
 
+# 메인 페이지 식단을 실제로 채우는 요청 (pages/00/js/0000.js 의 getFoodList).
+#   KH_getAjax(g_path + "/food/indexFoodList.do", "&locgbn=" + global_locgbn, ...)
+FOOD_API = "/food/indexFoodList.do"
+
+
+def _all_scripts(soup, limit_bytes: int = 500_000) -> list[tuple[str, str]]:
+    """페이지가 쓰는 스크립트를 인라인·외부 가리지 않고 모읍니다."""
+    out = []
+    for n, tag in enumerate(soup.find_all("script")):
+        if tag.get("src"):
+            continue
+        code = tag.string or tag.get_text() or ""
+        if code.strip():
+            out.append((f"인라인 #{n}", code))
+    for tag in soup.find_all("script", src=True):
+        src = tag["src"]
+        full = src if src.startswith("http") else BASE_URL + ("" if src.startswith("/") else "/") + src
+        try:
+            resp = requests.get(full, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+        except Exception:
+            continue
+        if len(resp.content) <= limit_bytes:
+            out.append((full, resp.text))
+    return out
+
+
+def probe() -> None:
+    """
+    식단 요청에 필요한 값(g_path, global_locgbn)을 찾아내고
+    실제로 호출해서 응답을 보여줍니다. `python menu.py --probe`.
+    """
+    page = BASE_URL + MENU_PATH
+    print(f"### {page} 의 스크립트에서 설정값 찾기")
+    scripts = _all_scripts(_soup(page))
+    blob = "\n".join(code for _, code in scripts)
+    print(f"  스크립트 {len(scripts)}개 확인")
+
+    for label, pattern in (
+        ("g_path", r"g_path\s*=\s*[^;\n]{0,120}"),
+        ("global_locgbn", r"global_locgbn\s*=\s*[^;\n]{0,120}"),
+        ("KH_getAjax", r"function\s+KH_getAjax[\s\S]{0,500}"),
+    ):
+        found = re.findall(pattern, blob)
+        print(f"\n  ── {label}: {len(found)}건 ──")
+        for item in found[:3]:
+            for line in item.splitlines()[:14]:
+                print(f"     {line.strip()[:150]}")
+            print("     ---")
+
+    paths = re.findall(r"g_path\s*=\s*[\"\']([^\"\']*)[\"\']", blob)
+    locs = re.findall(r"global_locgbn\s*=\s*[\"\']([^\"\']*)[\"\']", blob)
+    print(f"\n  찾은 g_path 후보: {paths or '(없음)'}")
+    print(f"  찾은 locgbn 후보: {locs or '(없음)'}")
+
+    print(f"\n### {FOOD_API} 직접 호출해 보기")
+    for path in dict.fromkeys(paths + [""]):
+        for loc in dict.fromkeys(locs + ["", "hyomin", "deu", "1"]):
+            url = BASE_URL + path + FOOD_API
+            for method in ("GET", "POST"):
+                try:
+                    resp = requests.request(
+                        method, url, params={"locgbn": loc} if method == "GET" else None,
+                        data={"locgbn": loc} if method == "POST" else None,
+                        headers={**HEADERS, "X-Requested-With": "XMLHttpRequest"}, timeout=15,
+                    )
+                except Exception as e:
+                    print(f"  {method} {url}?locgbn={loc} → 실패: {str(e)[:80]}")
+                    continue
+                body = resp.text.strip()
+                print(
+                    f"  {method} {url}?locgbn={loc} → {resp.status_code} "
+                    f"{resp.headers.get('content-type', '?')} {len(resp.content)}바이트"
+                )
+                if resp.status_code == 200 and body:
+                    print(f"      {body[:600]}")
+
+
 if __name__ == "__main__":
     # 이모지가 섞인 출력을 한글 Windows(cp949 콘솔)에서도 안전하게 찍습니다.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    if "--probe" in sys.argv:
+        probe()
+        sys.exit(0)
 
     if "--scripts" in sys.argv:
         find_scripts(BASE_URL + MENU_PATH)
