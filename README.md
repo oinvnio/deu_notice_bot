@@ -82,6 +82,10 @@ python crawler.py     # 카테고리별 공지 수집 결과를 출력 (디스�
 python menu.py        # 기숙사별 식단표 파싱 결과를 출력 (디스코드 전송 없음)
 ```
 
+Windows에서는 `python` 대신 `py`를 쓰면 확실합니다 (`py -m pip install -r requirements.txt`,
+`py menu.py`). Git Bash에서 가상환경을 쓸 경우 활성화는
+`source .venv/Scripts/activate` 입니다(PowerShell의 `.venv\Scripts\Activate.ps1`이 아닙니다).
+
 ## 동작 방식
 
 - **첫 실행 스팸 방지**: 카테고리를 새로 켜면 최신 5건만 전송합니다.

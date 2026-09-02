@@ -327,6 +327,9 @@ def fetch_menu(slug: str) -> dict:
 
 
 if __name__ == "__main__":
+    # 이모지가 섞인 출력을 한글 Windows(cp949 콘솔)에서도 안전하게 찍습니다.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     ok = True
     for slug, dorm in DORMS.items():
         menu = fetch_menu(slug)
