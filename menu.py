@@ -470,7 +470,10 @@ def diagnose(url: str) -> None:
             continue
         daily = _parse_daily(grid)
         days = daily or _parse_grid(grid)
-        if not days:
+        body_filled = any(cell.strip() for row in grid[1:] for cell in row)
+        if not days and not body_filled:
+            verdict = "머리글만 있고 내용이 비어 있음 → 자바스크립트로 채우는 표 (--scripts 확인)"
+        elif not days:
             verdict = "식단 아님"
         elif _looks_like_hours(days):
             verdict = "운영시간표(제외)"
@@ -524,9 +527,83 @@ def diagnose(url: str) -> None:
         print(f"     - {text} → {href}")
 
 
+# 식단을 실제로 불러오는 주소를 찾을 때 쓰는 단서.
+# 페이지에는 빈 <tbody id="food">만 있고 내용은 자바스크립트가 채웁니다.
+JS_PRIMARY = ("food", "siktan", "diet", "meal")
+JS_SECONDARY = ("ajax", "url", ".do", "getjson", "$.post", "$.get", "fetch(")
+JS_SKIP = ("jquery", "bootstrap", "swiper", "slick", "modernizr", "owl", "lightbox")
+
+
+def _scan_js(name: str, code: str, limit: int = 30) -> bool:
+    lines = code.splitlines()
+    hits = [
+        i for i, line in enumerate(lines)
+        if any(k in line.lower() for k in JS_PRIMARY + JS_SECONDARY)
+    ]
+    if not hits:
+        return False
+    print(f"  ── {name} ({len(lines)}줄 중 {len(hits)}줄 일치) ──")
+    shown: set[int] = set()
+    for i in hits[:limit]:
+        for j in range(max(0, i - 1), min(len(lines), i + 2)):
+            if j not in shown:
+                shown.add(j)
+                print(f"    {j + 1:5d}| {lines[j].strip()[:160]}")
+    return True
+
+
+def find_scripts(url: str) -> None:
+    """
+    식단을 불러오는 요청 주소를 페이지 스크립트에서 찾습니다.
+    `python menu.py --scripts` 로 실행합니다.
+    """
+    print(f"\n### {url}")
+    try:
+        soup = _soup(url)
+    except Exception as e:
+        print(f"  가져오기 실패: {e}")
+        return
+
+    scripts: list[tuple[str, str]] = []
+    for n, tag in enumerate(soup.find_all("script")):
+        if tag.get("src"):
+            continue
+        code = tag.string or tag.get_text() or ""
+        if code.strip():
+            scripts.append((f"인라인 스크립트 #{n}", code))
+
+    for tag in soup.find_all("script", src=True):
+        src = tag["src"]
+        if any(lib in src.lower() for lib in JS_SKIP):
+            continue
+        full = src if src.startswith("http") else BASE_URL + ("" if src.startswith("/") else "/") + src
+        try:
+            resp = requests.get(full, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"  {full} 가져오기 실패: {e}")
+            continue
+        if len(resp.content) > 300_000:
+            print(f"  {full} 너무 커서 건너뜀({len(resp.content) // 1024}KB)")
+            continue
+        scripts.append((full, resp.text))
+
+    # 'food' 같은 결정적 단어가 든 파일이 있으면 그것만 봅니다.
+    primary = [(n, c) for n, c in scripts if any(k in c.lower() for k in JS_PRIMARY)]
+    targets = primary or scripts
+    print(f"  스크립트 {len(scripts)}개 중 {len(targets)}개 확인")
+    if not any(_scan_js(name, code) for name, code in targets):
+        print("  단서를 찾지 못했습니다.")
+
+
 if __name__ == "__main__":
     # 이모지가 섞인 출력을 한글 Windows(cp949 콘솔)에서도 안전하게 찍습니다.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    if "--scripts" in sys.argv:
+        for url in [BASE_URL + MENU_PATH] + [BASE_URL + d.path for d in DORMS.values()]:
+            find_scripts(url)
+        sys.exit(0)
 
     if "--tables" in sys.argv:
         # 페이지에 어떤 표와 링크가 있는지 그대로 보여줍니다.
@@ -540,8 +617,9 @@ if __name__ == "__main__":
         print(f"\n{dorm.emoji} [{dorm.label}] {menu['url']} → {len(menu['days'])}일치")
         if not menu["days"]:
             ok = False
-            print("  ⚠️ 식단표를 찾지 못했습니다. 페이지 구조를 확인해 주세요:")
-            print(f"     curl -s {menu['url']} > menu.html")
+            print("  ⚠️ 식단표를 찾지 못했습니다. 아래로 원인을 확인해 보세요:")
+            print("     python menu.py --tables    # 페이지에 어떤 표가 있는지")
+            print("     python menu.py --scripts   # 식단을 불러오는 요청 주소 찾기")
             continue
 
         today = pick_today(menu["days"])
