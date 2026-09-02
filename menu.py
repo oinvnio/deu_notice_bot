@@ -484,6 +484,32 @@ def diagnose(url: str) -> None:
             line = " | ".join(c.replace("\n", " ") for c in cells[:7])
             print(f"        {r}행: {line[:100]}")
 
+    # 표로 안 되어 있을 수도 있으니 "OO 식단" 제목 주변 HTML을 그대로 보여줍니다.
+    for dorm in DORMS.values():
+        hits = [
+            el for el in soup.find_all(True)
+            if dorm.keyword in el.get_text(" ", strip=True)
+            and "식단" in el.get_text(" ", strip=True)
+            and len(el.get_text(" ", strip=True)) < 40
+        ]
+        if not hits:
+            print(f"  '{dorm.keyword} … 식단' 제목을 찾지 못했습니다.")
+            continue
+        # 가장 짧게 걸린 것이 제목입니다. 거기서 위로 올라가되,
+        # 식단 내용을 담은 상자에서 멈춥니다.
+        box = min(hits, key=lambda el: len(el.get_text(strip=True)))
+        for _ in range(4):
+            parent = box.parent
+            if parent is None or parent.name == "[document]":
+                break
+            if len(parent.get_text(strip=True)) > 400:
+                break
+            box = parent
+            if box.find(["table", "ul", "ol", "dl"]):
+                break
+        print(f"  ── '{dorm.label}' 주변 HTML ({box.name}) ──")
+        print("  " + str(box)[:1200].replace("\n", " ")[:1200])
+
     # 실제 식단표 페이지로 가는 링크가 어디 있는지 찾습니다.
     hits = []
     for a in soup.find_all("a"):
