@@ -8,7 +8,7 @@ from pathlib import Path
 import requests
 
 from crawler import CATEGORIES, Category, fetch_notices
-from menu import DORMS, KST, Dorm, fetch_menu, pick_today
+from menu import DORMS, KST, Dorm, fetch_menu, hours_for, pick_today
 
 # 이모지가 섞인 공지 제목을 출력해도 죽지 않도록 (Windows 콘솔 등)
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -172,7 +172,18 @@ def process_category(slug: str, seen: dict[str, set[str]]) -> bool:
 
 # ── 오늘의 식단 ────────────────────────────────────────────────────────
 
-def build_menu_embeds(dorm: Dorm, menu: dict, day: dict) -> list[dict]:
+def menu_footer(dorm: Dorm, hours: tuple[str, str] | None) -> str:
+    """임베드 맨 아래 한 줄에 그날 운영시간을 간략히 붙입니다."""
+    base = f"동의대 {dorm.label} 식단"
+    if not hours:
+        return base
+    label, times = hours
+    return _clip(f"{base}  ⏰ {label} · {times}", 2048)
+
+
+def build_menu_embeds(
+    dorm: Dorm, menu: dict, day: dict, hours: tuple[str, str] | None = None
+) -> list[dict]:
     """끼니 하나를 필드 하나로 만들고, 디스코드 한도에 맞춰 임베드를 나눕니다."""
     fields = [
         {
@@ -212,7 +223,7 @@ def build_menu_embeds(dorm: Dorm, menu: dict, day: dict) -> list[dict]:
             if day["day"]:
                 embed["description"] = f"📅 {_clip(day['day'], 200)}"
         if i == len(chunks) - 1:
-            embed["footer"] = {"text": f"동의대 {dorm.label} 식단"}
+            embed["footer"] = {"text": menu_footer(dorm, hours)}
         embeds.append(embed)
     return embeds
 
@@ -278,9 +289,10 @@ def process_menu(slug: str, seen: dict[str, set[str]]) -> bool:
         )
         return True
 
+    hours = hours_for(slug)
     print(f"[{dorm.label} 식단] 전송: {day['day']} ({len(day['meals'])}끼니)")
     try:
-        send_menu(build_menu_embeds(dorm, menu, day), webhook)
+        send_menu(build_menu_embeds(dorm, menu, day, hours), webhook)
     except requests.RequestException as e:
         # 날짜를 기록하지 않으므로 다음 실행에서 다시 시도합니다.
         send_alert(f"[{dorm.label} 식단] 디스코드 전송 실패: `{e}`", webhook)

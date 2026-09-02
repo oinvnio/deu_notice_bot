@@ -27,21 +27,22 @@ KST = timezone(timedelta(hours=9))
 
 class Dorm(NamedTuple):
     label: str      # 디스코드에 표시할 이름
-    path: str       # 식단표 페이지 경로
+    path: str       # 기숙사별 급식 안내 페이지 (메인 페이지가 비었을 때 예비로 훑음)
     color: int      # 임베드 왼쪽 띠 색상
     emoji: str      # 제목 앞에 붙일 이모지
     keyword: str    # 메인 페이지에서 이 관의 표를 골라낼 때 쓰는 단어
 
+
+# 두 기숙사의 그날 식단이 나란히 올라오는 페이지. 매일 갱신됩니다.
+# 한 페이지에 두 관이 함께 있으므로 표 앞 제목("효민생활관 식단" / "행복기숙사 식단")으로
+# 어느 관 것인지 가려냅니다.
+MENU_PATH = "/00/0000.do"
 
 # 슬러그는 GitHub Secret 이름(WEBHOOK_MENU_<슬러그 대문자>)에 그대로 쓰입니다.
 DORMS = {
     "hyomin": Dorm("효민생활관", "/60/6050.do", 0x2E8B57, "🍚", "효민"),
     "happy":  Dorm("행복기숙사", "/60/6051.do", 0xC05621, "🍱", "행복"),
 }
-
-# 전용 식단표 페이지가 비어 있을 때 훑어볼 예비 주소.
-# 메인 페이지 하단에도 식단이 매일 갱신되므로, 관 이름이 붙은 표만 골라 씁니다.
-FALLBACK_PATH = "/00/0000.do"
 
 # 표가 어느 관의 것인지 가려낼 때 쓰는 이름 목록
 KEYWORDS = tuple(d.keyword for d in DORMS.values())
@@ -228,6 +229,64 @@ def _looks_like_hours(days: list[dict]) -> bool:
     return timed * 2 >= len(texts)
 
 
+def _parse_daily(grid: list[list[str]]) -> list[dict] | None:
+    """
+    머리글이 조식·중식·석식이고 그 아래로 그날 메뉴만 들어 있는 표를 읽습니다.
+
+        | 조식        | 중식        | 석식        |
+        | 수제비국 …  | 얼큰버섯국… | 소불고기덮밥… |
+
+    날짜가 표 안에 없으므로 day/key는 비워 두고, 부르는 쪽에서 표 옆 날짜로 채웁니다.
+    주간 표(요일 열이 따로 있는 표)라면 None을 돌려 일반 경로에 넘깁니다.
+    """
+    if len(grid) < 2:
+        return None
+
+    header = grid[0]
+    meal_cols = [c for c, text in enumerate(header) if _is_meal(text)]
+    if len(meal_cols) < 2:
+        return None
+
+    body = [row for row in grid[1:] if any(cell.strip() for cell in row)]
+    if not body:
+        return None
+
+    # 첫 칸이 끼니가 아니면서 아래로 요일이 이어지면 주간 표입니다.
+    if not _is_meal(header[0]) and any(_is_day(row[0]) for row in body):
+        return None
+
+    meals = []
+    for c in meal_cols:
+        text = "\n".join(row[c] for row in body if row[c].strip()).strip()
+        if text:
+            meals.append({"name": header[c].replace("\n", " ").strip(), "text": text})
+
+    return [{"day": "", "key": "", "meals": meals}] if meals else None
+
+
+DATE_RE = re.compile(r"(20\d{2})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})")
+
+
+def _nearby_date(table, depth: int = 10) -> tuple[str, str]:
+    """
+    표 바깥(대개 제목 오른쪽)에 적힌 날짜를 찾아 (표시용 문자열, "MM-DD")로 돌려줍니다.
+    하루치 표에는 날짜 칸이 없어서 이 값으로 오늘 것인지 판단합니다.
+    """
+    node = table
+    for _ in range(depth):
+        node = node.find_previous(
+            ["caption", "h1", "h2", "h3", "h4", "h5", "strong", "b", "span", "p", "li", "td", "div"]
+        )
+        if node is None:
+            break
+        m = DATE_RE.search(node.get_text(" ", strip=True))
+        if m:
+            year, month, day = (int(x) for x in m.groups())
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                return f"{year}.{month:02d}.{day:02d}", f"{month:02d}-{day:02d}"
+    return "", ""
+
+
 def _select_table(soup, keyword: str = "", require_keyword: bool = False) -> list[dict]:
     """
     페이지의 모든 표를 훑어 식단표로 가장 그럴듯한 것을 고릅니다.
@@ -247,9 +306,13 @@ def _select_table(soup, keyword: str = "", require_keyword: bool = False) -> lis
             matched = bool(keyword) and _owner(table) == keyword
             if require_keyword and not matched:
                 continue
-            days = _parse_grid(_grid(table))
+            grid = _grid(table)
+            # 하루치 표를 먼저 시도합니다(주간 표면 None이 돌아와 일반 경로로 갑니다).
+            days = _parse_daily(grid) or _parse_grid(grid)
             if not days or _looks_like_hours(days):
                 continue
+            if len(days) == 1 and not days[0]["key"]:
+                days[0]["day"], days[0]["key"] = _nearby_date(table)
             score = len(days) + (100 if matched else 0)
             if score > best_score:
                 best, best_score = days, score
@@ -308,6 +371,45 @@ def pick_today(days: list[dict], today: datetime | None = None) -> dict | None:
     return next((d for d in days if d["key"] == wanted), None)
 
 
+# ── 식당 운영시간 (고정값) ─────────────────────────────────────────────
+#
+# 급식 안내 페이지의 운영시간 안내표를 보고 옮겨 적은 값입니다.
+#   효민생활관: https://dorm.deu.ac.kr/60/6050.do
+#   행복기숙사: https://dorm.deu.ac.kr/60/6051.do
+# 시간이 바뀌면 이 표만 고치면 됩니다. (확인일: 2026-09-02)
+#
+# 학기/방학은 달로 어림잡습니다(1·2·7·8월을 방학으로 봄). 개강·종강 시점이
+# 어긋날 수 있어서 고른 구분 이름("학기 중 평일" 등)을 항상 함께 보여줍니다.
+
+_HYOMIN_TERM_WEEKEND = ("학기 중 주말·공휴일", "조식 미운영 · 중식 11:30~13:30 · 석식 17:00~18:30")
+_HAPPY_OFF = ("방학·주말·공휴일", "조식 08:00~09:30 · 중식 11:30~13:30 · 석식 17:00~18:30")
+
+MEAL_HOURS: dict[str, dict[tuple[str, str], tuple[str, str]]] = {
+    "hyomin": {
+        ("학기", "평일"): ("학기 중 평일", "조식 07:30~09:00 · 중식 12:00~13:30 · 석식 17:00~19:00"),
+        ("학기", "주말"): _HYOMIN_TERM_WEEKEND,
+        ("방학", "평일"): ("방학 중 평일", "조식 07:30~09:00 · 중식 12:00~13:30 · 석식 17:00~18:30"),
+        ("방학", "주말"): ("방학 중 주말", "운영 안함"),
+    },
+    "happy": {
+        ("학기", "평일"): ("평일", "조식 07:30~09:00 · 중식 11:30~14:00 · 석식 16:50~19:00"),
+        ("학기", "주말"): _HAPPY_OFF,
+        ("방학", "평일"): _HAPPY_OFF,
+        ("방학", "주말"): _HAPPY_OFF,
+    },
+}
+
+VACATION_MONTHS = (1, 2, 7, 8)
+
+
+def hours_for(slug: str, today: datetime | None = None) -> tuple[str, str] | None:
+    """오늘에 해당하는 (구분 이름, 운영시간 한 줄)을 돌려줍니다."""
+    now = today or datetime.now(KST)
+    season = "방학" if now.month in VACATION_MONTHS else "학기"
+    kind = "주말" if now.weekday() >= 5 else "평일"
+    return MEAL_HOURS.get(slug, {}).get((season, kind))
+
+
 # ── 공개 API ───────────────────────────────────────────────────────────
 
 def _soup(url: str) -> BeautifulSoup:
@@ -329,15 +431,15 @@ def fetch_menu(slug: str) -> dict:
         raise ValueError(f"알 수 없는 기숙사: {slug}")
 
     dorm = DORMS[slug]
-    url = os.environ.get(f"MENU_URL_{slug.upper()}", "").strip() or BASE_URL + dorm.path
 
-    days = _select_table(_soup(url), dorm.keyword)
+    # 메인 페이지에 두 관 식단이 함께 있으므로 관 이름이 붙은 표만 인정합니다.
+    url = os.environ.get(f"MENU_URL_{slug.upper()}", "").strip() or BASE_URL + MENU_PATH
+    days = _select_table(_soup(url), dorm.keyword, require_keyword=True)
 
-    # 전용 페이지에서 못 찾으면 메인 페이지 하단 식단을 훑습니다.
-    # 여기엔 두 관의 표가 함께 있으므로 관 이름이 붙은 표만 인정합니다.
-    if not days and dorm.path != FALLBACK_PATH:
-        url = BASE_URL + FALLBACK_PATH
-        days = _select_table(_soup(url), dorm.keyword, require_keyword=True)
+    # 거기서 못 찾으면 기숙사별 급식 안내 페이지를 훑어봅니다.
+    if not days:
+        url = BASE_URL + dorm.path
+        days = _select_table(_soup(url), dorm.keyword)
 
     return {
         "dorm": slug,
@@ -366,13 +468,17 @@ def diagnose(url: str) -> None:
         if not grid:
             print(f"  [{i}] 빈 표")
             continue
-        days = _parse_grid(grid)
+        daily = _parse_daily(grid)
+        days = daily or _parse_grid(grid)
         if not days:
             verdict = "식단 아님"
         elif _looks_like_hours(days):
             verdict = "운영시간표(제외)"
+        elif daily:
+            label, _ = _nearby_date(table)
+            verdict = f"하루치 식단 후보 (표 옆 날짜: {label or '못 찾음'}, 주인: {_owner(table) or '?'})"
         else:
-            verdict = f"식단표 후보 {len(days)}일치"
+            verdict = f"주간 식단 후보 {len(days)}일치 (주인: {_owner(table) or '?'})"
         print(f"  [{i}] {len(grid)}행 x {len(grid[0])}열 · {verdict}")
         for r, cells in enumerate(grid[:3]):
             line = " | ".join(c.replace("\n", " ") for c in cells[:7])
@@ -398,11 +504,7 @@ if __name__ == "__main__":
 
     if "--tables" in sys.argv:
         # 페이지에 어떤 표와 링크가 있는지 그대로 보여줍니다.
-        seen_urls = []
-        for dorm in DORMS.values():
-            seen_urls.append(BASE_URL + dorm.path)
-        seen_urls.append(BASE_URL + FALLBACK_PATH)
-        for url in seen_urls:
+        for url in [BASE_URL + MENU_PATH] + [BASE_URL + d.path for d in DORMS.values()]:
             diagnose(url)
         sys.exit(0)
 
