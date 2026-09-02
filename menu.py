@@ -12,9 +12,11 @@ main.py가 pick_today()로 그날 칸만 뽑아 씁니다.
 표 모양 자체가 바뀌면 빈 결과를 돌려주므로 main.py가 경고를 보냅니다.
 """
 
+import json
 import os
 import re
 import sys
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 
@@ -29,7 +31,8 @@ class Dorm(NamedTuple):
     label: str      # 디스코드에 표시할 이름
     color: int      # 임베드 왼쪽 띠 색상
     emoji: str      # 제목 앞에 붙일 이모지
-    keyword: str    # 메인 페이지에서 이 관의 표를 골라낼 때 쓰는 단어
+    keyword: str    # 예비 경로(표 파싱)에서 이 관의 표를 골라낼 때 쓰는 단어
+    api_key: str    # 식단 API 응답에서 이 관의 자료가 담긴 키
 
 
 # 두 기숙사의 그날 식단이 나란히 올라오는 페이지. 매일 갱신됩니다.
@@ -39,8 +42,8 @@ MENU_PATH = "/00/0000.do"
 
 # 슬러그는 GitHub Secret 이름(WEBHOOK_MENU_<슬러그 대문자>)에 그대로 쓰입니다.
 DORMS = {
-    "hyomin": Dorm("효민생활관", 0x2E8B57, "🍚", "효민"),
-    "happy":  Dorm("행복기숙사", 0xC05621, "🍱", "행복"),
+    "hyomin": Dorm("효민생활관", 0x2E8B57, "🍚", "효민", "hyomin_list"),
+    "happy":  Dorm("행복기숙사", 0xC05621, "🍱", "행복", "happy_list"),
 }
 
 # 표가 어느 관의 것인지 가려낼 때 쓰는 이름 목록
@@ -409,6 +412,102 @@ def hours_for(slug: str, today: datetime | None = None) -> tuple[str, str] | Non
     return MEAL_HOURS.get(slug, {}).get((season, kind))
 
 
+# ── 식단 API ───────────────────────────────────────────────────────────
+#
+# 메인 페이지는 빈 표만 내려주고, 식단은 이 요청으로 채웁니다.
+#   pages/00/js/0000.js: KH_getAjax(g_path + "/food/indexFoodList.do",
+#                                   "&locgbn=" + global_locgbn, resultGetFoodList)
+# 한 번 호출하면 두 기숙사의 일주일치가 함께 옵니다.
+#   {"root": [{"hyomin_list": [{...}], "happy_list": [{...}]}]}
+# 한 기숙사 자료는 날짜와 메뉴가 번호로 짝지어진 납작한 딕셔너리입니다.
+#   {"fo_date3": "2026-09-02", "fo_menu_lun3": "한식: …", "today": "2026-09-02", …}
+
+FOOD_API = "/food/indexFoodList.do"
+FOOD_LOCGBN = "DE"    # 스크립트의 global_locgbn 값. 다른 값을 넣으면 빈 목록이 옵니다.
+
+# 응답의 fo_menu_<종류><번호>에서 <종류>를 끼니 이름으로 바꿉니다.
+# (표시 순서, 이름) — 모르는 종류는 뒤로 보내되 버리지 않고 그대로 보여줍니다.
+MEAL_FIELDS = {
+    "bre": (0, "조식"), "brk": (0, "조식"), "brf": (0, "조식"), "mor": (0, "조식"),
+    "lun": (1, "중식"), "lnc": (1, "중식"), "lch": (1, "중식"),
+    "din": (2, "석식"), "dnr": (2, "석식"), "sup": (2, "석식"), "eve": (2, "석식"),
+}
+
+MENU_FIELD_RE = re.compile(r"^fo_menu_([a-z]+?)(\d+)$", re.IGNORECASE)
+DATE_FIELD_RE = re.compile(r"^fo_date(\d+)$", re.IGNORECASE)
+
+
+def _clean_menu(text: str) -> str:
+    """
+    "한식:  동그랑땡조림,  시금치나물 / 일품:  함박스테이크" 를 읽기 좋게 다듬습니다.
+    한식·일품처럼 '/'로 나뉜 갈래만 줄을 바꾸고, 반찬은 한 줄에 둡니다.
+    """
+    text = _WS.sub(" ", text.replace("\n", " ")).strip()
+    lines = []
+    for part in text.split("/"):
+        items = [item.strip() for item in part.split(",")]
+        joined = ", ".join(item for item in items if item)
+        if joined:
+            lines.append(joined)
+    return "\n".join(lines)
+
+
+def _iso_label(iso: str) -> str:
+    """"2026-09-02" → "2026.09.02 (수)"."""
+    try:
+        date = datetime.strptime(iso[:10], "%Y-%m-%d")
+    except ValueError:
+        return iso
+    return f"{date.year}.{date.month:02d}.{date.day:02d} ({WEEKDAYS[date.weekday()]})"
+
+
+def parse_food_record(record: dict) -> list[dict]:
+    """API가 준 납작한 딕셔너리를 날짜별로 묶습니다."""
+    dates: dict[str, str] = {}
+    for key, value in record.items():
+        m = DATE_FIELD_RE.match(str(key))
+        if m and str(value).strip():
+            dates[m.group(1)] = str(value).strip()
+
+    meals: dict[str, list[tuple[int, str, str]]] = {}
+    for key, value in record.items():
+        m = MENU_FIELD_RE.match(str(key))
+        if not m or not str(value).strip():
+            continue
+        kind, index = m.group(1).lower(), m.group(2)
+        order, name = MEAL_FIELDS.get(kind, (99, kind))
+        meals.setdefault(index, []).append((order, name, _clean_menu(str(value))))
+
+    days = []
+    for index in sorted(dates, key=lambda i: int(i)):
+        items = sorted(meals.get(index, []))
+        if not items:
+            continue
+        days.append({
+            "day": _iso_label(dates[index]),
+            "key": _day_key(dates[index]),
+            "meals": [{"name": name, "text": text} for _, name, text in items],
+        })
+    return days
+
+
+@lru_cache(maxsize=1)
+def fetch_food_api() -> dict:
+    """
+    식단 API를 호출합니다. 두 기숙사가 한 응답에 오므로 한 번만 부르고 재사용합니다.
+    (응답의 Content-Type은 text/html이지만 내용은 JSON입니다.)
+    """
+    resp = requests.get(
+        BASE_URL + FOOD_API,
+        params={"locgbn": FOOD_LOCGBN},
+        headers={**HEADERS, "X-Requested-With": "XMLHttpRequest"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    root = json.loads(resp.text).get("root") or []
+    return root[0] if root else {}
+
+
 # ── 공개 API ───────────────────────────────────────────────────────────
 
 def _soup(url: str) -> BeautifulSoup:
@@ -422,7 +521,7 @@ def fetch_menu(slug: str) -> dict:
     """
     지정한 기숙사의 이번 주 식단표를 크롤링합니다.
     반환값: {"dorm", "label", "url", "days"}
-            days = [{"day": "9/1(월)", "key": "09-01",
+            days = [{"day": "2026.09.02 (수)", "key": "09-02",
                      "meals": [{"name": "조식", "text": "..."}]}]
     파싱에 실패하면 days가 빈 리스트입니다(main.py가 경고를 보냅니다).
     """
@@ -430,16 +529,27 @@ def fetch_menu(slug: str) -> dict:
         raise ValueError(f"알 수 없는 기숙사: {slug}")
 
     dorm = DORMS[slug]
-
-    # 식단은 메인 페이지 한 곳에만 있습니다. 두 관이 함께 올라오므로
-    # 표 앞 제목("효민생활관 식단" / "행복기숙사 식단")이 붙은 표만 인정합니다.
+    # 디스코드 임베드에 걸 링크는 사람이 보는 페이지로 둡니다.
     url = os.environ.get(f"MENU_URL_{slug.upper()}", "").strip() or BASE_URL + MENU_PATH
-    days = _select_table(_soup(url), dorm.keyword, require_keyword=True)
+
+    # 식단 API가 정식 경로입니다. 페이지 HTML에는 빈 표만 들어 있습니다.
+    source = "API"
+    try:
+        days = parse_food_record((fetch_food_api().get(dorm.api_key) or [{}])[0])
+    except Exception as e:
+        print(f"[{dorm.label}] 식단 API 실패({e}). 페이지 표 파싱으로 넘어갑니다.")
+        days = []
+
+    # API가 막히거나 형식이 바뀌면 예비로 페이지의 표를 읽어 봅니다.
+    if not days:
+        source = "페이지 표(예비)"
+        days = _select_table(_soup(url), dorm.keyword, require_keyword=True)
 
     return {
         "dorm": slug,
         "label": dorm.label,
         "url": url,
+        "source": source,
         "days": days,
     }
 
@@ -689,10 +799,11 @@ if __name__ == "__main__":
     ok = True
     for slug, dorm in DORMS.items():
         menu = fetch_menu(slug)
-        print(f"\n{dorm.emoji} [{dorm.label}] {menu['url']} → {len(menu['days'])}일치")
+        print(f"\n{dorm.emoji} [{dorm.label}] {menu['source']} → {len(menu['days'])}일치")
         if not menu["days"]:
             ok = False
-            print("  ⚠️ 식단표를 찾지 못했습니다. 아래로 원인을 확인해 보세요:")
+            print("  ⚠️ 식단을 찾지 못했습니다. 아래로 원인을 확인해 보세요:")
+            print("     python menu.py --probe     # 식단 API를 직접 호출해 응답 보기")
             print("     python menu.py --tables    # 페이지에 어떤 표가 있는지")
             print("     python menu.py --scripts   # 식단을 불러오는 요청 주소 찾기")
             continue
