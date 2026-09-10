@@ -1,5 +1,6 @@
 import re
 import sys
+import time
 from typing import NamedTuple
 
 import requests
@@ -35,11 +36,41 @@ HEADERS = {
 }
 
 
-def fetch_notices(slug: str = "general") -> list[dict]:
+# 학교 서버가 연속 요청을 간헐적으로 막습니다. 그때는 오류가 아니라
+# 목록이 없는 페이지를 200으로 돌려주기 때문에 "0건 파싱"으로 보입니다.
+# 한 번 비었다고 바로 경고하지 말고 잠깐 쉬었다 다시 시도합니다.
+MAX_RETRIES = 3
+RETRY_BACKOFF = 3.0   # 재시도 간격(초). 시도마다 배로 늘립니다.
+
+
+def fetch_notices(slug: str = "general", retries: int = MAX_RETRIES) -> list[dict]:
     """
     지정한 카테고리의 공지 목록을 크롤링합니다.
     반환값: [{"id", "title", "date", "url", "category"}, ...]
+
+    빈 목록이 오면 재시도하고, 그래도 비면 빈 리스트를 돌려줍니다
+    (호출한 쪽이 셀렉터 파손으로 보고 경고를 보냅니다).
     """
+    last_error: Exception | None = None
+
+    for attempt in range(retries):
+        if attempt:
+            time.sleep(RETRY_BACKOFF * attempt)
+        try:
+            notices = _fetch_once(slug)
+        except requests.RequestException as e:
+            last_error = e
+            continue
+        if notices:
+            return notices
+        print(f"  [{slug}] {attempt + 1}번째 시도에서 0건, 다시 시도합니다.")
+
+    if last_error is not None:
+        raise last_error
+    return []
+
+
+def _fetch_once(slug: str) -> list[dict]:
     if slug not in CATEGORIES:
         raise ValueError(f"알 수 없는 카테고리: {slug}")
 

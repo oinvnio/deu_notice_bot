@@ -440,11 +440,13 @@ DATE_FIELD_RE = re.compile(r"^fo_date(\d+)$", re.IGNORECASE)
 def _clean_menu(text: str) -> str:
     """
     "한식:  동그랑땡조림,  시금치나물 / 일품:  함박스테이크" 를 읽기 좋게 다듬습니다.
-    한식·일품처럼 '/'로 나뉜 갈래만 줄을 바꾸고, 반찬은 한 줄에 둡니다.
+    한식·일품처럼 ' / '로 나뉜 갈래만 줄을 바꾸고, 반찬은 한 줄에 둡니다.
+    앞뒤에 공백이 없는 슬래시는 메뉴 이름의 일부이므로 자르지 않습니다.
+    ("깍두기 도시락김/음료캔" 이 두 줄로 쪼개지면 안 됩니다.)
     """
     text = _WS.sub(" ", text.replace("\n", " ")).strip()
     lines = []
-    for part in text.split("/"):
+    for part in re.split(r"\s+/\s+", text):
         items = [item.strip() for item in part.split(",")]
         joined = ", ".join(item for item in items if item)
         if joined:
@@ -480,9 +482,9 @@ def parse_food_record(record: dict) -> list[dict]:
 
     days = []
     for index in sorted(dates, key=lambda i: int(i)):
+        # 메뉴가 비어 있어도 날짜는 남깁니다. 그래야 "그날은 미운영"과
+        # "아직 자료가 안 올라옴"을 구분해서 후자만 경고할 수 있습니다.
         items = sorted(meals.get(index, []))
-        if not items:
-            continue
         days.append({
             "day": _iso_label(dates[index]),
             "key": _day_key(dates[index]),

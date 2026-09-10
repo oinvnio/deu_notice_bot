@@ -18,13 +18,19 @@ SEEN_FILE = Path("seen.json")
 MAX_FIRST_RUN = 5     # 카테고리를 처음 켰을 때 최신 N개만 전송 (스팸 방지)
 MAX_SEEN = 300        # 카테고리별 seen 보관 개수 (파일 무한 증가 방지)
 SEND_INTERVAL = 0.5   # 연속 전송 간격(초), 디스코드 레이트리밋 회피
+# 게시판을 쉬는 시간 없이 연달아 요청하면 학교 서버가 간헐적으로 막습니다.
+FETCH_INTERVAL = 1.5  # 카테고리 사이에 쉬는 시간(초)
 
 # 식단표는 공지와 성격이 달라 seen.json 안에서 "menu:" 슬롯에 따로 기록합니다.
 # (공지는 공지 ID, 식단은 전송한 날짜를 넣습니다.)
 MENU_SLOT = "menu:"
-MENU_ALERT_SLOT = "menu:_alerts"
+# 같은 경고가 실행마다 반복되지 않도록, 오늘 이미 보낸 경고를 여기에 적어둡니다.
+ALERT_SLOT = "_alerts"
+LEGACY_ALERT_SLOT = "menu:_alerts"   # 예전 이름. load_seen에서 정리합니다.
 MENU_MAX_FIELDS = 6      # 임베드 하나에 담을 끼니 수
-MENU_MAX_CHARS = 4500    # 임베드 하나의 글자 수 상한 (디스코드 한도 6000)
+MENU_MAX_CHARS = 4500    # 임베드 하나의 글자 수 상한
+MESSAGE_MAX_CHARS = 5500 # 한 메시지에 담는 임베드 글자 수 합계 상한 (디스코드 한도 6000)
+MENU_STALE_HOUR = 10     # 이 시각(KST)까지 오늘 자료가 없으면 고장으로 보고 알립니다.
 
 # 카테고리별 웹후크가 없으면 이 값으로 대체합니다(전부 한 채널로 전송).
 FALLBACK_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
@@ -64,7 +70,12 @@ def load_seen() -> dict[str, set[str]]:
     # 구버전 형식(플랫 리스트)은 '일반' 카테고리 기록으로 취급합니다.
     if isinstance(data, list):
         return {"general": set(data)}
-    return {slug: set(ids) for slug, ids in data.items()}
+    seen = {slug: set(ids) for slug, ids in data.items()}
+    # 알림 기록 슬롯 이름이 바뀌었습니다. 남아 있으면 옮기고 지웁니다.
+    legacy = seen.pop(LEGACY_ALERT_SLOT, None)
+    if legacy:
+        seen.setdefault(ALERT_SLOT, set()).update(legacy)
+    return seen
 
 
 def save_seen(seen: dict[str, set[str]]) -> None:
@@ -125,18 +136,19 @@ def process_category(slug: str, seen: dict[str, set[str]]) -> bool:
     try:
         notices = fetch_notices(slug)
     except Exception as e:
-        send_alert(f"[{label}] 공지 페이지를 가져오지 못했습니다: `{e}`", webhook)
-        return False
-
-    # 파싱 결과가 0건이면 사이트 개편으로 셀렉터가 깨졌을 가능성이 큽니다.
-    # 조용히 종료하면 아무도 눈치채지 못하므로 반드시 알립니다.
-    if not notices:
-        send_alert(
-            f"[{label}] 공지를 한 건도 파싱하지 못했습니다. "
-            "홈페이지 개편으로 `crawler.py`의 셀렉터가 깨졌을 수 있습니다.",
-            webhook,
+        return alert_once_a_day(
+            f"[{label}] 공지 페이지를 가져오지 못했습니다: `{e}`", webhook, seen, f"notice:{slug}"
         )
-        return False
+
+    # 재시도까지 했는데 0건이면 셀렉터 파손이거나 학교 서버가 막고 있는 것입니다.
+    # 조용히 종료하면 아무도 눈치채지 못하므로 알리되, 하루 한 번만 보냅니다.
+    if not notices:
+        return alert_once_a_day(
+            f"[{label}] 공지를 한 건도 파싱하지 못했습니다. "
+            "홈페이지 개편으로 `crawler.py`의 셀렉터가 깨졌거나, "
+            "학교 서버가 연속 요청을 막고 있을 수 있습니다.",
+            webhook, seen, f"notice:{slug}",
+        )
 
     known = seen.setdefault(slug, set())
     is_first_run = not known
@@ -160,8 +172,9 @@ def process_category(slug: str, seen: dict[str, set[str]]) -> bool:
             send_discord(notice, webhook, cat)
         except requests.RequestException as e:
             # 실패한 공지는 seen에 넣지 않아 다음 실행에서 다시 시도합니다.
-            send_alert(f"[{label}] 디스코드 전송 실패: `{e}`", webhook)
-            return False
+            return alert_once_a_day(
+                f"[{label}] 디스코드 전송 실패: `{e}`", webhook, seen, f"notice:{slug}"
+            )
         known.add(notice["id"])
 
     # 전송이 모두 끝났을 때만 나머지(키워드 불일치·첫 실행 제외분)를 본 것으로 처리합니다.
@@ -228,29 +241,57 @@ def build_menu_embeds(
     return embeds
 
 
+def _embed_size(embed: dict) -> int:
+    return (
+        len(embed.get("title", ""))
+        + len(embed.get("description", ""))
+        + len(embed.get("footer", {}).get("text", ""))
+        + sum(len(f["name"]) + len(f["value"]) for f in embed.get("fields", []))
+    )
+
+
 def send_menu(embeds: list[dict], webhook: str) -> None:
-    # 한 메시지에 임베드는 10개까지만 담을 수 있습니다.
-    for i in range(0, len(embeds), 10):
+    """
+    디스코드 한 메시지에는 임베드 10개, 그리고 임베드 전체를 합쳐 6000자까지만
+    담을 수 있습니다. 둘 중 하나라도 넘으면 메시지를 나눠 보냅니다.
+    """
+    batches: list[list[dict]] = []
+    current: list[dict] = []
+    size = 0
+    for embed in embeds:
+        cost = _embed_size(embed)
+        if current and (len(current) >= 10 or size + cost > MESSAGE_MAX_CHARS):
+            batches.append(current)
+            current, size = [], 0
+        current.append(embed)
+        size += cost
+    if current:
+        batches.append(current)
+
+    for i, batch in enumerate(batches):
         if i:
             time.sleep(SEND_INTERVAL)
-        resp = requests.post(webhook, json={"embeds": embeds[i:i + 10]}, timeout=15)
+        resp = requests.post(webhook, json={"embeds": batch}, timeout=15)
         resp.raise_for_status()
 
 
-def alert_once_a_day(message: str, webhook: str, seen: dict[str, set[str]], slug: str) -> bool:
+def alert_once_a_day(message: str, webhook: str, seen: dict[str, set[str]], key: str) -> bool:
     """
-    식단 크롤링 실패는 30분마다 반복되므로 하루 한 번만 알립니다.
-    (같은 경고가 채널을 도배하면 정작 봐야 할 때 보지 않게 됩니다.)
+    같은 경고를 실행마다 반복해서 보내지 않고 하루 한 번만 보냅니다.
+
+    학교 서버가 막히면 7개 카테고리가 한꺼번에 실패하므로, 이 장치가 없으면
+    실행 한 번에 경고가 7개씩 채널에 쌓입니다. 도배된 경고는 아무도 안 봅니다.
+    key는 카테고리·기숙사마다 다르게 줍니다(예: "notice:general", "menu:happy").
     """
     today = datetime.now(KST).strftime("%Y-%m-%d")
-    fired = {mark for mark in seen.get(MENU_ALERT_SLOT, set()) if mark.endswith(today)}
-    mark = f"{slug}:{today}"
+    fired = {mark for mark in seen.get(ALERT_SLOT, set()) if mark.endswith(today)}
+    mark = f"{key}:{today}"
     if mark in fired:
         print(f"⚠️ {message} (오늘 이미 알림을 보냈습니다)")
     else:
         send_alert(message, webhook)
         fired.add(mark)
-    seen[MENU_ALERT_SLOT] = fired
+    seen[ALERT_SLOT] = fired
     return False
 
 
@@ -269,24 +310,44 @@ def process_menu(slug: str, seen: dict[str, set[str]]) -> bool:
         menu = fetch_menu(slug)
     except Exception as e:
         return alert_once_a_day(
-            f"[{dorm.label} 식단] 페이지를 가져오지 못했습니다: `{e}`", webhook, seen, slug
+            f"[{dorm.label} 식단] 페이지를 가져오지 못했습니다: `{e}`",
+            webhook, seen, f"menu:{slug}",
         )
 
     if not menu["days"]:
         return alert_once_a_day(
             f"[{dorm.label} 식단] 식단표를 찾지 못했습니다. "
             f"홈페이지 개편으로 표 구조가 바뀌었을 수 있습니다: {menu['url']}",
-            webhook, seen, slug,
+            webhook, seen, f"menu:{slug}",
+        )
+
+    # 받아온 주에 메뉴가 하나도 없으면 자료 형식이 바뀐 것입니다.
+    if not any(d["meals"] for d in menu["days"]):
+        return alert_once_a_day(
+            f"[{dorm.label} 식단] 받아온 자료에 메뉴가 하나도 없습니다. "
+            f"응답 형식이 바뀌었을 수 있습니다: {menu['url']}",
+            webhook, seen, f"menu:{slug}",
         )
 
     day = pick_today(menu["days"])
     if day is None:
-        # 아직 이번 주 식단이 안 올라왔거나, 오늘은 식당을 운영하지 않는 날입니다.
-        # 둘 다 정상적인 상황이라 경고하지 않고 다음 실행에서 다시 확인합니다.
-        print(
-            f"[{dorm.label} 식단] 오늘 칸이 없습니다. "
-            f"(표에 있는 날: {', '.join(d['day'] for d in menu['days'])})"
+        # 오늘 날짜 자체가 자료에 없습니다. 새 주 식단이 아직 안 올라왔거나
+        # 지난주 자료가 그대로 걸려 있는 것입니다. 아침 일찍은 흔한 일이라
+        # 조용히 넘어가고, 낮까지 그대로면 고장으로 보고 알립니다.
+        # (이 경고가 없으면 식단이 며칠씩 안 와도 아무도 모릅니다.)
+        listed = ", ".join(d["day"] for d in menu["days"]) or "(없음)"
+        if datetime.now(KST).hour < MENU_STALE_HOUR:
+            print(f"[{dorm.label} 식단] 아직 오늘 자료가 없습니다. (자료에 있는 날: {listed})")
+            return True
+        return alert_once_a_day(
+            f"[{dorm.label} 식단] 오늘 자료가 올라오지 않았습니다. 자료에 있는 날: {listed}",
+            webhook, seen, f"menu:{slug}",
         )
+
+    if not day["meals"]:
+        # 자료에 그날이 있는데 메뉴가 비어 있으면 운영하지 않는 날입니다. 정상입니다.
+        # 나중에 채워질 수도 있으니 전송한 것으로 기록하지는 않습니다.
+        print(f"[{dorm.label} 식단] {day['day']}: 운영하지 않는 날입니다.")
         return True
 
     hours = hours_for(slug)
@@ -295,8 +356,9 @@ def process_menu(slug: str, seen: dict[str, set[str]]) -> bool:
         send_menu(build_menu_embeds(dorm, menu, day, hours), webhook)
     except requests.RequestException as e:
         # 날짜를 기록하지 않으므로 다음 실행에서 다시 시도합니다.
-        send_alert(f"[{dorm.label} 식단] 디스코드 전송 실패: `{e}`", webhook)
-        return False
+        return alert_once_a_day(
+            f"[{dorm.label} 식단] 디스코드 전송 실패: `{e}`", webhook, seen, f"menu:{slug}"
+        )
 
     sent.add(today)
     return True
@@ -308,7 +370,7 @@ def safe_process_menu(slug: str, seen: dict[str, set[str]]) -> bool:
     except Exception as e:
         return alert_once_a_day(
             f"[{DORMS[slug].label} 식단] 처리 중 예기치 못한 오류: `{e}`",
-            menu_webhook_for(slug), seen, slug,
+            menu_webhook_for(slug), seen, f"menu:{slug}",
         )
 
 
@@ -318,8 +380,10 @@ def safe_process(slug: str, seen: dict[str, set[str]]) -> bool:
         return process_category(slug, seen)
     except Exception as e:
         label = CATEGORIES[slug].label
-        send_alert(f"[{label}] 처리 중 예기치 못한 오류: `{e}`", webhook_for(slug))
-        return False
+        return alert_once_a_day(
+            f"[{label}] 처리 중 예기치 못한 오류: `{e}`",
+            webhook_for(slug), seen, f"notice:{slug}",
+        )
 
 
 def main() -> None:
@@ -337,7 +401,15 @@ def main() -> None:
         print(f"웹후크 미설정으로 건너뜀: {', '.join(skipped)}")
 
     seen = load_seen()
-    failed = [slug for slug in active if not safe_process(slug, seen)]
+
+    # 게시판을 연달아 때리면 학교 서버가 막는 일이 있어 사이를 조금 띄웁니다.
+    failed = []
+    for i, slug in enumerate(active):
+        if i:
+            time.sleep(FETCH_INTERVAL)
+        if not safe_process(slug, seen):
+            failed.append(slug)
+
     menu_failed = [slug for slug in menu_active if not safe_process_menu(slug, seen)]
     # 어떤 항목이 실패하든, 이미 전송에 성공한 기록은 반드시 남깁니다.
     save_seen(seen)

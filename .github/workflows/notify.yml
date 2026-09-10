@@ -13,6 +13,12 @@ on:
     - cron: "0,30 0-8 * * 1-5"  # 월~금 오전 9:00 ~ 오후 5:30 KST
   workflow_dispatch:           # 수동 실행 버튼
 
+# 실행이 겹치면 두 실행이 같은 공지를 각각 보내고 seen.json을 서로 덮어씁니다.
+# 앞선 실행이 끝날 때까지 기다리게 합니다.
+concurrency:
+  group: notify
+  cancel-in-progress: false
+
 jobs:
   check-notice:
     runs-on: ubuntu-latest
@@ -67,7 +73,21 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add seen.json
           # 변경사항이 있을 때만 커밋 (에러 방지)
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: update seen.json [skip ci]"
-            git push
+          if git diff --cached --quiet; then
+            echo "seen.json 변경 없음"
+            exit 0
           fi
+          git commit -m "chore: update seen.json [skip ci]"
+          # 이 사이에 다른 실행이나 사람이 main에 커밋했으면 push가 거부됩니다.
+          # 그대로 두면 전송 기록이 날아가 다음 실행에서 같은 공지를 또 보냅니다.
+          # 원격을 받아 얹은 뒤 다시 시도합니다.
+          for attempt in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+            echo "push 거부됨(${attempt}번째). 원격을 받아 다시 시도합니다."
+            git pull --rebase --autostash origin main || exit 1
+            sleep $((attempt * 3))
+          done
+          echo "::error::seen.json을 저장하지 못했습니다. 다음 실행에서 공지가 중복될 수 있습니다."
+          exit 1
