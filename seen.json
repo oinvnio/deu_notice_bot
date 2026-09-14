@@ -1,4 +1,13 @@
 {
+  "_alerts": [
+    "notice:bids:2026-09-14",
+    "notice:dormitory:2026-09-14",
+    "notice:education:2026-09-14",
+    "notice:external:2026-09-14",
+    "notice:general:2026-09-14",
+    "notice:job:2026-09-14",
+    "notice:scholarship:2026-09-14"
+  ],
   "bids": [
     "87798",
     "87866",
