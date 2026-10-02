@@ -1,6 +1,12 @@
 {
   "_alerts": [
-    "notice:general:2026-09-30"
+    "notice:bids:2026-10-02",
+    "notice:dormitory:2026-10-02",
+    "notice:education:2026-10-02",
+    "notice:external:2026-10-02",
+    "notice:general:2026-10-02",
+    "notice:job:2026-10-02",
+    "notice:scholarship:2026-10-02"
   ],
   "bids": [
     "87798",
